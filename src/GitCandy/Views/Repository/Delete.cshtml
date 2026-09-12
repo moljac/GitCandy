@@ -1,0 +1,13 @@
+@model string
+@{
+    ViewData["Title"] = $"Delete {Model}";
+}
+<header class="page-heading"><div><h1>Delete @Model</h1><p>This destructive action cannot be undone.</p></div></header>
+<div class="alert alert-danger" role="alert">
+    <strong>Repository metadata, Git objects, and LFS objects will be deleted.</strong>
+    The physical repository is quarantined inside the configured repository root before recursive deletion.
+</div>
+<form asp-action="Delete" asp-route-name="@Model" method="post" class="form-actions" data-confirm="Delete repository @Model?">
+    <a asp-action="Detail" asp-route-name="@Model" class="btn"><i data-lucide="arrow-left"></i> @Text["Shared_Back"]</a>
+    <button type="submit" class="btn btn-danger"><i data-lucide="trash-2"></i> @Text["Shared_Delete"]</button>
+</form>

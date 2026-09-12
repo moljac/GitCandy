@@ -1,0 +1,12 @@
+@model ErrorViewModel
+@{ ViewData["Title"] = "Something went wrong"; }
+<section class="account-shell" role="alert">
+    <i data-lucide="circle-alert"></i>
+    <h1>Something went wrong</h1>
+    <p>GitCandy could not complete this request. Try again or return to the repository list.</p>
+    @if (Model.ShowRequestId)
+    {
+        <p class="entity-meta"><strong>Request ID:</strong> <code>@Model.RequestId</code></p>
+    }
+    <div class="form-actions"><a asp-controller="Repository" asp-action="Index" class="btn btn-primary"><i data-lucide="folder-git-2"></i> Repositories</a></div>
+</section>

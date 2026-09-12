@@ -1,0 +1,134 @@
+@model PullRequestDetailViewModel
+@{ ViewData["Title"] = $"#{Model.PullRequest.Number} {Model.PullRequest.Title}"; }
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="@Model.Repository.CanonicalPath">@Model.Repository.NamespaceSlug/@Model.Repository.RepositorySlug</a><span>/</span><a asp-action="Index" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug">Pull requests</a><span>/</span><span>#@Model.PullRequest.Number</span></nav>
+<header class="page-heading issue-heading">
+    <div>
+        <h1>@Model.PullRequest.Title <span class="issue-number">#@Model.PullRequest.Number</span></h1>
+        <p><span class="status-badge @(Model.PullRequest.State == PullRequestState.Open ? "status-public" : "status-private")">@(Model.PullRequest.IsDraft && Model.PullRequest.State == PullRequestState.Open ? "Draft" : Model.PullRequest.State)</span> @Model.PullRequest.Author wants to merge <strong>@Model.PullRequest.SourceBranch</strong> into <strong>@Model.PullRequest.TargetBranch</strong></p>
+    </div>
+    @if (Model.CanEdit) { <div class="page-actions"><a class="btn" asp-action="Edit" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number"><i data-lucide="pencil"></i> Edit</a></div> }
+</header>
+@if (TempData["PullRequestError"] is string error) { <div class="alert alert-warning" role="alert">@error</div> }
+@if (TempData["PullRequestSuccess"] is string success) { <div class="alert alert-success" role="status">@success</div> }
+<nav class="repository-navigation" aria-label="Pull Request views">
+    <a class="is-active" asp-action="Detail" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number"><i data-lucide="message-square"></i> Conversation</a>
+    <a asp-action="Commits" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number"><i data-lucide="list-ordered"></i> Commits</a>
+    <a asp-action="Files" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number"><i data-lucide="files"></i> Files changed</a>
+</nav>
+<div class="issue-detail-layout">
+    <div class="issue-conversation">
+        <article class="discussion-post"><header><strong>@Model.PullRequest.Author</strong><span>@Model.PullRequest.CreatedAtUtc.ToString("u")</span></header><div class="markdown-body">@Html.Raw(Model.PullRequest.BodyHtml)</div></article>
+        <ol class="issue-timeline">
+        @foreach (var item in Model.PullRequest.Timeline.Where(item => item.Type != PullRequestEventType.Created))
+        {
+            <li class="timeline-event"><i data-lucide="activity"></i><span><strong>@item.Actor</strong> @item.Type.ToString().ToLowerInvariant() @item.Detail</span><time>@item.CreatedAtUtc.ToString("u")</time></li>
+        }
+        </ol>
+        @if (Model.ReviewOverview.Reviews.Count > 0)
+        {
+            <section class="pull-request-reviews" aria-labelledby="review-history-heading">
+                <h2 id="review-history-heading">Reviews</h2>
+                @foreach (var review in Model.ReviewOverview.Reviews.OrderByDescending(item => item.SubmittedAtUtc))
+                {
+                    <article class="discussion-post">
+                        <header>
+                            <strong>@review.Reviewer</strong>
+                            <span class="status-badge @(review.State == PullRequestReviewState.Approved && review.IsEffectiveApproval ? "status-public" : "status-private")">@review.State</span>
+                            @if (review.IsStale) { <span class="status-badge">Stale</span> }
+                            <time>@review.SubmittedAtUtc.ToString("u")</time>
+                        </header>
+                        @if (!string.IsNullOrEmpty(review.BodyHtml)) { <div class="markdown-body">@Html.Raw(review.BodyHtml)</div> }
+                        @if (review.State == PullRequestReviewState.Dismissed)
+                        {
+                            <p>Dismissed by @review.DismissedBy: @review.DismissalReason</p>
+                        }
+                        else if (Model.IsOwner)
+                        {
+                            <form asp-action="DismissReview" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" asp-route-reviewId="@review.Id" method="post">
+                                <label>Dismissal reason<input name="Reason" maxlength="1000" required /></label>
+                                <button class="btn" type="submit"><i data-lucide="circle-x"></i> Dismiss</button>
+                            </form>
+                        }
+                    </article>
+                }
+            </section>
+        }
+        @if (Model.CanSubmitReview && Model.PullRequest.State == PullRequestState.Open)
+        {
+            <section class="review-compose" aria-labelledby="submit-review-heading">
+                <h2 id="submit-review-heading">Submit review</h2>
+                <form asp-action="SubmitReview" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post">
+                    <label>Decision<select name="State"><option value="Commented">Comment</option><option value="Approved">Approve</option><option value="ChangesRequested">Request changes</option></select></label>
+                    <label>Review<textarea name="Body" rows="5" maxlength="65536"></textarea></label>
+                    <button class="btn btn-primary" type="submit"><i data-lucide="send"></i> Submit review</button>
+                </form>
+            </section>
+        }
+    </div>
+    <aside class="issue-sidebar">
+        <section><h2>Source</h2><p>@Model.PullRequest.SourceNamespace/@Model.PullRequest.SourceRepository:@Model.PullRequest.SourceBranch</p><code>@Model.PullRequest.CurrentHeadSha[..Math.Min(12, Model.PullRequest.CurrentHeadSha.Length)]</code></section>
+        <section><h2>Target</h2><p>@Model.PullRequest.TargetBranch</p><code>@Model.PullRequest.CurrentBaseSha[..Math.Min(12, Model.PullRequest.CurrentBaseSha.Length)]</code></section>
+        <section>
+            <h2>Assignee</h2>
+            <p>@(Model.ReviewOverview.Assignee ?? "Unassigned")</p>
+            @if (Model.CanManageReviewers)
+            {
+                <form asp-action="Assignee" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post">
+                    <select name="assigneeUserId" aria-label="Assignee"><option value="">Unassigned</option>@foreach (var item in Model.ReviewOverview.Candidates) { <option value="@item.UserId" selected="@(item.UserId == Model.ReviewOverview.AssigneeUserId)">@item.UserName</option> }</select>
+                    <button class="icon-button" type="submit" aria-label="Save assignee" data-tooltip="Save assignee"><i data-lucide="check"></i></button>
+                </form>
+            }
+        </section>
+        <section>
+            <h2>Reviewers</h2>
+            @if (Model.ReviewOverview.Reviewers.Count == 0) { <p>None requested</p> }
+            @foreach (var reviewer in Model.ReviewOverview.Reviewers)
+            {
+                <div class="reviewer-status">
+                    <strong>@reviewer.UserName</strong>
+                    <span>@(reviewer.IsReviewRequested ? "Review requested" : reviewer.LatestReview?.State.ToString())</span>
+                    @if (reviewer.LatestReview?.IsStale == true) { <span>Stale</span> }
+                    @if (Model.CanManageReviewers && Model.PullRequest.State == PullRequestState.Open)
+                    {
+                        <form asp-action="RequestReview" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post"><input type="hidden" name="reviewerUserId" value="@reviewer.UserId" /><button class="icon-button" type="submit" aria-label="Re-request review from @reviewer.UserName" data-tooltip="Re-request review"><i data-lucide="refresh-cw"></i></button></form>
+                    }
+                </div>
+            }
+            @if (Model.CanManageReviewers && Model.PullRequest.State == PullRequestState.Open)
+            {
+                <form asp-action="RequestReview" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post">
+                    <select name="reviewerUserId" aria-label="Reviewer" required><option value="">Select reviewer</option>@foreach (var item in Model.ReviewOverview.Candidates) { <option value="@item.UserId">@item.UserName</option> }</select>
+                    <button class="icon-button" type="submit" aria-label="Request review" data-tooltip="Request review"><i data-lucide="user-plus"></i></button>
+                </form>
+            }
+        </section>
+        <section>
+            <h2>Review policy</h2>
+            <p>@(Model.ReviewOverview.Policy.AllowAuthorApproval ? "Author approval allowed" : "Author approval disabled")</p>
+            <p>@(Model.ReviewOverview.Policy.DismissStaleApprovals ? "Stale approvals dismissed" : "Stale approvals retained")</p>
+        </section>
+        <section>
+            <h2>Mergeability</h2>
+            <p><span class="status-badge @(Model.Mergeability.IsMergeable ? "status-public" : "status-private")">@Model.Mergeability.State</span></p>
+            <p>@Model.Mergeability.EffectiveApprovals / @Model.Mergeability.RequiredApprovals approvals</p>
+            @foreach (var reason in Model.Mergeability.BlockingReasons) { <p>@reason</p> }
+            @if (Model.CanMerge && Model.PullRequest.State == PullRequestState.Open)
+            {
+                <form asp-action="Merge" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post">
+                    <input type="hidden" name="Version" value="@Model.PullRequest.Version" />
+                    <label>Method<select name="Method"><option value="MergeCommit">Create merge commit</option><option value="Squash">Squash and merge</option></select></label>
+                    <label>Message<textarea name="Message" rows="4" maxlength="65536" required>Merge pull request #@Model.PullRequest.Number: @Model.PullRequest.Title</textarea></label>
+                    <button class="btn btn-primary" type="submit" disabled="@(!Model.Mergeability.IsMergeable ? "disabled" : null)"><i data-lucide="git-merge"></i> Merge</button>
+                </form>
+            }
+        </section>
+        @if (Model.CanEdit && Model.PullRequest.State == PullRequestState.Open)
+        {
+            <form asp-action="Draft" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post"><input type="hidden" name="isDraft" value="@(!Model.PullRequest.IsDraft ? "true" : "false")" /><button class="btn" type="submit"><i data-lucide="@(Model.PullRequest.IsDraft ? "send" : "file-pen-line")"></i> @(Model.PullRequest.IsDraft ? "Mark ready for review" : "Convert to draft")</button></form>
+        }
+        @if (Model.CanChangeState && Model.PullRequest.State != PullRequestState.Merged)
+        {
+            <form asp-action="State" asp-route-namespaceSlug="@Model.Repository.NamespaceSlug" asp-route-project="@Model.Repository.RepositorySlug" asp-route-number="@Model.PullRequest.Number" method="post"><input type="hidden" name="state" value="@(Model.PullRequest.State == PullRequestState.Open ? "Closed" : "Open")" /><button class="btn" type="submit"><i data-lucide="@(Model.PullRequest.State == PullRequestState.Open ? "circle-x" : "rotate-ccw")"></i> @(Model.PullRequest.State == PullRequestState.Open ? "Close pull request" : "Reopen pull request")</button></form>
+        }
+    </aside>
+</div>

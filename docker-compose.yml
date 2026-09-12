@@ -1,0 +1,17 @@
+name: gitcandy
+
+services:
+  gitcandy:
+    image: ${GITCANDY_IMAGE:-ghcr.io/iotsharp/gitcandy:latest}
+    ports:
+      - "${GITCANDY_HTTP_PORT:-8080}:8080"
+      - "${GITCANDY_SSH_PORT:-2222}:2222"
+    volumes:
+      - gitcandy-data:/var/lib/gitcandy
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+volumes:
+  gitcandy-data:

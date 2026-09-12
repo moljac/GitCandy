@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <HelpSiteSource>$(MSBuildProjectDirectory)\..\..\docs\help</HelpSiteSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" />
+    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="Quartz.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GitCandy.Core\GitCandy.Core.csproj" />
+    <ProjectReference Include="..\GitCandy.Data\GitCandy.Data.csproj" />
+    <ProjectReference Include="..\GitCandy.Data.SonnetDB\GitCandy.Data.SonnetDB.csproj" />
+    <ProjectReference Include="..\GitCandy.Data.Sqlite\GitCandy.Data.Sqlite.csproj" />
+    <ProjectReference Include="..\GitCandy.Git\GitCandy.Git.csproj" />
+    <ProjectReference Include="..\GitCandy.Ssh\GitCandy.Ssh.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClientAssetSource Include="ClientApp\app.css;ClientApp\app.js" />
+    <HelpSiteInput Include="$(HelpSiteSource)\**\*" />
+  </ItemGroup>
+
+  <Target Name="BuildClientAssets"
+          BeforeTargets="Build"
+          Condition="'$(SkipClientAssetsBuild)' != 'true'"
+          Inputs="ClientApp\package-lock.json;@(ClientAssetSource)"
+          Outputs="wwwroot\assets\app.css;wwwroot\assets\app.js">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\ClientApp" Command="npm ci --ignore-scripts" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\ClientApp" Command="npm run build" />
+  </Target>
+
+  <Target Name="BuildHelpSite"
+          BeforeTargets="Build"
+          Condition="'$(SkipHelpSiteBuild)' != 'true'"
+          Inputs="@(HelpSiteInput)"
+          Outputs="$(IntermediateOutputPath)help-site.stamp">
+    <RemoveDir Directories="$(IntermediateOutputPath)help-site" />
+    <MakeDir Directories="$(IntermediateOutputPath)help-site" />
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+          Command="dotnet tool run jekyllnet build --source &quot;$(HelpSiteSource)&quot; --destination &quot;$(IntermediateOutputPath)help-site&quot;" />
+    <WriteLinesToFile File="$(IntermediateOutputPath)help-site.stamp" Lines="JekyllNet 0.2.5" Overwrite="true" />
+  </Target>
+
+  <Target Name="CopyHelpSiteToBuildOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="BuildHelpSite"
+          Condition="'$(SkipHelpSiteBuild)' != 'true'">
+    <ItemGroup>
+      <GeneratedHelpSiteFile Include="$(IntermediateOutputPath)help-site\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(OutDir)wwwroot\help" />
+    <Copy SourceFiles="@(GeneratedHelpSiteFile)"
+          DestinationFiles="@(GeneratedHelpSiteFile->'$(OutDir)wwwroot\help\%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+
+  <Target Name="CopyHelpSiteToPublishOutput"
+          AfterTargets="Publish"
+          DependsOnTargets="BuildHelpSite"
+          Condition="'$(SkipHelpSiteBuild)' != 'true'">
+    <ItemGroup>
+      <PublishedHelpSiteFile Include="$(IntermediateOutputPath)help-site\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(PublishDir)wwwroot\help" />
+    <Copy SourceFiles="@(PublishedHelpSiteFile)"
+          DestinationFiles="@(PublishedHelpSiteFile->'$(PublishDir)wwwroot\help\%(RecursiveDir)%(Filename)%(Extension)')" />
+  </Target>
+
+</Project>

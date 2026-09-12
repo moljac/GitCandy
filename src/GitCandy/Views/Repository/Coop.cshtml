@@ -1,0 +1,76 @@
+@model RepositoryDetailsViewModel
+@{
+    ViewData["Title"] = $"Relationships - {Model.Repository.Name}";
+}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a asp-action="Index">@Text["Shared_Repositories"]</a><span>/</span><a asp-action="Detail" asp-route-name="@Model.Repository.Name">@Model.Repository.Name</a><span>/</span><span>Relationships</span></nav>
+<header class="page-heading">
+    <div><h1>Repository relationships</h1><p>Manage explicit user and team access to <strong>@Model.Repository.Name</strong>.</p></div>
+    <div class="page-actions"><a asp-action="Detail" asp-route-name="@Model.Repository.Name" class="btn"><i data-lucide="arrow-left"></i> @Text["Shared_Back"]</a></div>
+</header>
+<div class="split-layout">
+    <section aria-labelledby="repository-users-heading">
+        <h2 id="repository-users-heading">@Text["Shared_Users"]</h2>
+        @if (Model.Repository.Users.Count == 0)
+        {
+            <div class="empty-state"><div><i data-lucide="user"></i><p>No explicit user access.</p></div></div>
+        }
+        else
+        {
+            <ul class="entity-list">
+            @foreach (var user in Model.Repository.Users)
+            {
+                <li class="entity-row">
+                    <div><strong>@user.UserName</strong><div class="entity-meta">Read: @user.AllowRead · Write: @user.AllowWrite · Owner: @user.IsOwner</div></div>
+                    <details class="account-menu">
+                        <summary class="btn btn-xs">Access <i data-lucide="chevron-down"></i></summary>
+                        <div class="popover-menu">
+                            <form asp-action="ChooseUser" method="post"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="User" value="@user.UserName" /><input type="hidden" name="Act" value="read" /><input type="hidden" name="Value" value="@(!user.AllowRead)" /><button type="submit">@(user.AllowRead ? "Disable read" : "Enable read")</button></form>
+                            <form asp-action="ChooseUser" method="post"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="User" value="@user.UserName" /><input type="hidden" name="Act" value="write" /><input type="hidden" name="Value" value="@(!user.AllowWrite)" /><button type="submit">@(user.AllowWrite ? "Disable write" : "Enable write")</button></form>
+                            <form asp-action="ChooseUser" method="post"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="User" value="@user.UserName" /><input type="hidden" name="Act" value="owner" /><input type="hidden" name="Value" value="@(!user.IsOwner)" /><button type="submit">@(user.IsOwner ? "Remove owner" : "Make owner")</button></form>
+                            <hr class="popover-divider" />
+                            <form asp-action="ChooseUser" method="post" data-confirm="Remove @user.UserName from @Model.Repository.Name?"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="User" value="@user.UserName" /><input type="hidden" name="Act" value="del" /><button type="submit"><i data-lucide="trash-2"></i> Remove</button></form>
+                        </div>
+                    </details>
+                </li>
+            }
+            </ul>
+        }
+        <form asp-action="ChooseUser" method="post" class="toolbar">
+            <input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="Act" value="add" />
+            <div class="form-field"><label for="repository-user">Username</label><input id="repository-user" name="User" required autocomplete="off" /></div>
+            <button type="submit" class="btn btn-primary"><i data-lucide="plus"></i> Add user</button>
+        </form>
+    </section>
+    <section aria-labelledby="repository-teams-heading">
+        <h2 id="repository-teams-heading">@Text["Shared_Teams"]</h2>
+        @if (Model.Repository.Teams.Count == 0)
+        {
+            <div class="empty-state"><div><i data-lucide="users"></i><p>No team access.</p></div></div>
+        }
+        else
+        {
+            <ul class="entity-list">
+            @foreach (var team in Model.Repository.Teams)
+            {
+                <li class="entity-row">
+                    <div><strong>@team.TeamName</strong><div class="entity-meta">Read: @team.AllowRead · Write: @team.AllowWrite</div></div>
+                    <details class="account-menu">
+                        <summary class="btn btn-xs">Access <i data-lucide="chevron-down"></i></summary>
+                        <div class="popover-menu">
+                            <form asp-action="ChooseTeam" method="post"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="Team" value="@team.TeamName" /><input type="hidden" name="Act" value="read" /><input type="hidden" name="Value" value="@(!team.AllowRead)" /><button type="submit">@(team.AllowRead ? "Disable read" : "Enable read")</button></form>
+                            <form asp-action="ChooseTeam" method="post"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="Team" value="@team.TeamName" /><input type="hidden" name="Act" value="write" /><input type="hidden" name="Value" value="@(!team.AllowWrite)" /><button type="submit">@(team.AllowWrite ? "Disable write" : "Enable write")</button></form>
+                            <hr class="popover-divider" />
+                            <form asp-action="ChooseTeam" method="post" data-confirm="Remove @team.TeamName from @Model.Repository.Name?"><input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="Team" value="@team.TeamName" /><input type="hidden" name="Act" value="del" /><button type="submit"><i data-lucide="trash-2"></i> Remove</button></form>
+                        </div>
+                    </details>
+                </li>
+            }
+            </ul>
+        }
+        <form asp-action="ChooseTeam" method="post" class="toolbar">
+            <input type="hidden" name="Name" value="@Model.Repository.Name" /><input type="hidden" name="Act" value="add" />
+            <div class="form-field"><label for="repository-team">Team</label><input id="repository-team" name="Team" required autocomplete="off" /></div>
+            <button type="submit" class="btn btn-primary"><i data-lucide="plus"></i> Add team</button>
+        </form>
+    </section>
+</div>

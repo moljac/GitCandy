@@ -1,0 +1,72 @@
+using System.Net;
+using GitCandy.Configuration;
+using GitCandy.Controllers;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+namespace GitCandy.Tests;
+
+[TestClass]
+public sealed class CompatibilityRouteTests
+{
+    [TestMethod]
+    public async Task MapGitCandyCompatibilityRoutes_WithAnonymousRootPath_RendersProductPage()
+    {
+        await using var app = await StartRouteTestAppAsync();
+        using var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+        {
+            BaseAddress = new Uri(GetServerAddress(app)),
+        };
+
+        using var homeResponse = await httpClient.GetAsync("/");
+        Assert.AreEqual(HttpStatusCode.OK, homeResponse.StatusCode);
+        StringAssert.Contains(await homeResponse.Content.ReadAsStringAsync(), "class=\"landing-body\"");
+    }
+
+    private static async Task<WebApplication> StartRouteTestAppAsync()
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = GetWebProjectRoot(),
+            EnvironmentName = Environments.Development,
+        });
+        builder.WebHost.UseKestrel();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Services.AddControllersWithViews()
+            .AddApplicationPart(typeof(CompatibilityController).Assembly);
+        builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+
+        var app = builder.Build();
+        app.MapGitCandyCompatibilityRoutes();
+
+        await app.StartAsync();
+        return app;
+    }
+
+    private static string GetServerAddress(WebApplication app)
+    {
+        var addresses = app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()?
+            .Addresses;
+
+        Assert.IsNotNull(addresses);
+        Assert.AreEqual(1, addresses.Count);
+        return addresses.Single();
+    }
+
+    private static string GetWebProjectRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "GitCandy.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        Assert.IsNotNull(directory);
+        return Path.Combine(directory.FullName, "src", "GitCandy");
+    }
+}

@@ -1,0 +1,113 @@
+# GitCandy 活动产品路线图
+
+更新日期：2026-08-24
+
+本文件只维护尚未完成的工作。已经退出活动路线图的 M0-M12.7、验收结论和专题文档入口见 [已完成里程碑索引](docs/roadmap/completed-milestones.md)；重组前的完整路线图见 [2026-07-13 历史快照](docs/roadmap/roadmap-archive-2026-07-13.md)。
+
+## 状态与维护规则
+
+- `🚧`：正在实施，至少还有一个验收项未闭环。
+- `⬜`：尚未开始，或没有可验证的完成记录。
+- 活动路线图不保留完成任务表；里程碑完成后整体迁入 `docs/roadmap/completed-milestones.md`。
+- 不能用“没有发现”表述“绝对没有缺陷”。完成结论必须附构建、测试、专项验收和已知剩余风险。
+- 一个变更只对应一个编号或一个明确垂直切片，不把 schema、UI、协议、部署和无关重构混在一起。
+- 默认继续使用 `master`，不擅自创建或切换分支。
+
+## 当前边界
+
+- 唯一活动 solution 是 `GitCandy.slnx`，目标 `net10.0`。
+- 默认运行数据库仍是 SQLite；SQL Server 保留 migration SQL 路径；SonnetDB 只由专用配置显式启用。
+- GitCandy 继续采用单进程 host：Web UI、Git Smart HTTP、内置 SSH、Quartz 和后台入口共同启动和停止。
+- Git HTTP/SSH 继续复用统一 repository resolver、权限和 `IGitTransportBackend`，不能在业务层新增散落的进程调用。
+- M14 的四级团队治理和企业身份联邦、M15 远程账号与单向 mirror、M15.5 帮助中心均已完成并迁入完成索引；当前从 M15.6 OCI Registry 开始继续按依赖顺序推进。
+
+## 已确认的产品决策与冲突处理
+
+| 主题 | 决策 | 解决的冲突 |
+| --- | --- | --- |
+| 登录首页 | `/me` 是仅当前用户可见的私人工作台；登录后访问 `/` 默认进入 `/me` | 不再把 `/me` 定义成公开个人页的 Repositories tab |
+| 公开个人页 | `/{username}` 表示公开个人页；使用 allowlist `tab` 展示 repositories、stars、packages、teams | 公开身份展示与私人工作入口分离，避免隐私和导航语义混杂 |
+| Todo | 表示“仍需要我处理”的可行动状态，支持完成、恢复和 snooze；读过通知不会自动完成 Todo | Todo 不等于未读通知 |
+| Notification | 表示某件事已经发生并投递给当前用户，维护 read/unread 和投递原因 | 通知不承担工作状态，不因 Todo 完成而删除历史 |
+| Feed | 表示关注、参与、团队和仓库活动的上下文时间线，可筛选但不是收件箱 | Feed 不参与 unread 计数，也不替代审计日志 |
+| 团队通知 | 使用统一通知的 `team` 来源/筛选维度，不建立第二套团队收件箱 | 避免重复投递、重复已读状态和权限撤销后的数据泄漏 |
+| 需要关注的仓库 | 根据 Todo、未读通知、近期交互、Issue/PR 和更新时间排序，并显示原因 | 不把 owner 仓库的页面流量或 Star 人气误当成个人工作优先级 |
+| 公开推荐 | `/explore` 和 dashboard 推荐只读取公开候选集及版本化快照 | 登录用户的私有权限不能污染公开排行榜 |
+| “开源”文案 | 没有显式 SPDX/许可证证据时只能称“公开仓库”；确认开放许可证后才称“开源项目” | 避免把 public 错误等同于 open source |
+| Activity 与 Audit | Activity 为用户可见产品事件；Audit 为不可篡改安全证据，可共享事件 envelope 但必须分开存储和保留 | M12.7 Feed 不能替代 M13 审计 |
+| Packages | M12.7 只提供真实目录和空状态；OCI push/pull、存储、GC 由 M15.6 实现 | 不提前展示无后端的上传能力 |
+| 通知阶段 | M12.7 建立统一 inbox 和 dashboard 摘要；M13 在其上扩展 PR/review/check/release 与外部投递 | 避免 M12.7 和 M13 各建一套通知模型 |
+
+## 当前实施顺序
+
+1. M15.6 Registry 完成后接入 Packages 实际数据。
+2. M16 最后接入知识库和 MCP。
+
+## ⬜ Milestone 15.6：SonnetDB-backed OCI Container Registry
+
+目标：由 GitCandy 暴露 OCI Distribution `/v2/`，EF Core 保存 registry metadata，SonnetDB bucket 保存内容寻址 blob；最终用户权限始终由 GitCandy enforcement，不把 bucket policy 当作安全边界。
+
+大 layer 全程流式。upload session、digest、manifest/tag、multi-arch、配额、GC、reconciliation、备份恢复和真实客户端/conformance 必须共同闭环。M12.7 Packages 在本阶段才显示实际 image 操作。
+
+| 编号 | 状态 | 主题 | 验收重点 |
+| --- | --- | --- | --- |
+| #169I | ⬜ | OCI 兼容矩阵与架构决策 | API/media type/client、URL/域名、SonnetDB SDK、非目标和回滚 |
+| #169J | ⬜ | Blob abstraction 与 SonnetDB hardening | stream/Range/multipart/SHA-256/conditional create/promote、crash/disk-full |
+| #169K | ⬜ | OCI metadata schema | blob/manifest/link/tag/upload 状态机、唯一索引、并发和三 provider migration |
+| #169L | ⬜ | Registry token 与权限 | bearer challenge、PAT 换短 token、pull/push/delete/admin scope 和审计 |
+| #169M | ⬜ | Blob push/pull | probe、HEAD/GET/Range、resumable/monolithic upload、digest 和 mount |
+| #169N | ⬜ | Manifest、tag 与 multi-arch | media negotiation、OCI index、child graph、tags/list、delete 和并发更新 |
+| #169O | ⬜ | Packages/Container UI 与文档 | image/tag/platform/size/pull、visibility、retention，并同步 `/help` 和 CHANGES |
+| #169P | ⬜ | 配额、GC 与 reconciliation | logical/physical quota、upload expiry、mark/sweep、修复、health 和低优先级 job |
+| #169Q | ⬜ | Conformance 与客户端矩阵 | OCI suite、Docker/Podman、TLS/proxy、resume、Range、mount 和 multi-arch |
+| #169R | ⬜ | 安全、故障、规模与恢复 | 越权、spoof、逃逸、并发、大镜像、slow client、kill/disk-full、恢复和资源隔离 |
+
+## ⬜ Milestone 16：Agent Memory、文档知识库与 MCP
+
+目标：摄入 Git 仓库、规范文档、ADR、CI、review 和 Agent 会话，在独立 SonnetDB knowledge schema 中建立结构化、全文和向量索引，并通过 Web/API/MCP 提供可引用的代码与文档查询。
+
+原则：结构化优先、向量补充；只读起步；增量索引不进入 Git 热路径；所有查询复用 repository 权限；生成 HTML、third-party、secret、临时日志和重复副本不摄入。MCP 是应用服务适配层，不是 endpoint 自动反射代理。
+
+| 编号 | 状态 | 主题 | 验收重点 |
+| --- | --- | --- | --- |
+| #170 | ⬜ | Code Memory 方案与 schema | repo/file/symbol/edge/chunk/commit/decision/memory、权限和规模边界 |
+| #171 | ⬜ | Git/文件/文档 ingest | 基础增量扫描、hash、取消和状态 |
+| #172 | ⬜ | C# 符号索引器 | Roslyn 输出 namespace/type/member/test/endpoint 和位置 |
+| #173 | ⬜ | 调用与引用边 | calls/references/implements/tests/imports/routes_to 和影响查询 |
+| #174 | ⬜ | Code Memory MCP tools | search/symbol/callers/callees/impact/snippet/decision tools |
+| #175 | ⬜ | Hybrid Search | BM25、embedding KNN、metadata filter 和可解释融合 |
+| #176 | ⬜ | Agent Memory API | 会话摘要、memory 读写、tool audit 和 repo/branch 权限 |
+| #177 | ⬜ | Explorer UI | 索引状态、文件/符号、调用关系、影响、决策和 memory |
+| #178 | ⬜ | VS Code/Copilot 样例 | 当前符号、调用者、影响和历史决策场景 |
+| #179 | ⬜ | 规模验证 | GitCandy 和中大型 C# 仓库的 ingest/query/profile 报告 |
+| #180 | ⬜ | 文档 corpus manifest | canonical/version/audience/public、hash 和排除规则 |
+| #181 | ⬜ | SonnetDB knowledge schema | documents/chunks/state、BM25/HNSW、配额、备份和模型维度 |
+| #182 | ⬜ | 自动增量摄入与诊断 | upsert/delete、幂等、取消、限流、失败恢复、重建和健康页 |
+| #183 | ⬜ | 文档 Search 与 MCP | `docs_search/get/topics`、引用、低置信度、版本/语言/权限 |
+| #184 | ⬜ | API inventory 与 MCP matrix | 每个业务/协议 endpoint 的映射、scope、风险、版本或排除原因 |
+| #185 | ⬜ | MCP host 与只读业务 tools | Streamable HTTP、PAT/Bearer、授权、限流、分页、审计和 tracing |
+| #186 | ⬜ | MCP 写工具治理 | 最小 scope、幂等、并发、确认、审计、可禁用和 secret 边界 |
+| #187 | ⬜ | MCP parity、安全与规模 | 权限 parity、schema、prompt injection、越权、枚举、撤销、并发和大结果 |
+
+完成门槛：私有内容不越权；每个 MCP 结果可追溯到稳定资源或同版本 `/help` 引用；未配置 SonnetDB 时核心 Git 和帮助站点正常且知识功能明确不可用；索引和查询不破坏 clone/fetch/push 延迟、流式和内存边界。
+
+## 跨里程碑风险
+
+- 任何新的全局列表、Feed、Todo、Notification、search、webhook、MCP 或 recommendation 都可能泄漏私有资源，必须在查询时重新校验权限。
+- Todo/Notification/Feed/Audit/Webhook 若各自直接监听业务表会产生重复和漂移；应共享版本化事件 envelope，但保持各自状态和事务边界。
+- public 不等于 open source；License 不明确时不能使用“开源排行”或“开源推荐”。
+- Star、访问、下载和导入 commit 容易被刷；排名必须使用成功事件聚合、时间衰减、异常降权、算法版本和稳定快照。
+- PAT、deploy key、provider token、registry token、MCP token 和企业 secret 必须独立 scope、可撤销、可审计且不进入 URL/日志。
+- Mirror、Registry、Knowledge ingest 和 GC 都是资源密集后台任务，必须限流、可取消、可恢复，并保护 Git HTTP/SSH 热路径。
+- `/help/current` 后续必须随用户可见功能、配置、公开 URL 和 API 变更同步更新，已归档迁移说明不能覆盖当前操作指南。
+
+## 参考文档
+
+- [已完成里程碑索引](docs/roadmap/completed-milestones.md)
+- [重组前路线图历史快照](docs/roadmap/roadmap-archive-2026-07-13.md)
+- [协作路线设计](docs/product/collaboration-roadmap.md)
+- [企业仓库与身份路线设计](docs/product/enterprise-repository-roadmap.md)
+- [数据库 provider](docs/database-providers.md)
+- [部署、备份与回滚](docs/deployment.md)
+- [M15.5 帮助中心验收记录](docs/migration/m15-5-help-center.md)
+- [CHANGES](CHANGES.md)

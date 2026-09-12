@@ -1,0 +1,552 @@
+using GitCandy.Application;
+using GitCandy.Data;
+using GitCandy.Data.Domain;
+using GitCandy.Git;
+using GitCandy.Remotes;
+using GitCandy.Web.Remotes;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace GitCandy.Tests;
+
+[TestClass]
+public sealed class RemoteMirrorServiceTests
+{
+    [TestMethod]
+    public async Task EnqueueAsync_WithRepeatedReference_MergesLatestEventAndIncrementsGeneration()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Push);
+        var queue = new RemoteMirrorJobQueue(fixture.DbContextFactory, TimeProvider.System);
+        var sink = new RemoteMirrorPushEventSink(fixture.DbContextFactory, queue, TimeProvider.System);
+        var first = new RemoteMirrorRefEvent(
+            new string('0', 40),
+            new string('a', 40),
+            "refs/heads/main");
+        var second = new RemoteMirrorRefEvent(
+            new string('a', 40),
+            new string('b', 40),
+            "refs/heads/main");
+
+        await sink.EnqueueAsync(fixture.RepositoryId, [first]);
+        await sink.EnqueueAsync(fixture.RepositoryId, [second]);
+
+        await using var dbContext = fixture.CreateDbContext();
+        var pending = await dbContext.RemoteMirrorRefUpdates.AsNoTracking().SingleAsync();
+        Assert.AreEqual(2L, pending.Generation);
+        Assert.AreEqual(second.OldObjectId, pending.OldObjectId);
+        Assert.AreEqual(second.NewObjectId, pending.NewObjectId);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPullDivergenceStop_PreservesLocalReferenceAndRecordsDivergence()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Pull);
+        fixture.References.LocalReferences["refs/heads/main"] = new string('b', 40);
+        fixture.References.RemoteReferences["refs/heads/main"] = new string('c', 40);
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsFalse(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorStatus.Diverged, result.Status);
+        Assert.AreEqual(RemoteMirrorErrorCodes.Diverged, result.ErrorCode);
+        Assert.AreEqual(new string('b', 40), fixture.References.LocalReferences["refs/heads/main"]);
+        await using var dbContext = fixture.CreateDbContext();
+        var mirror = await dbContext.RepositoryMirrors.AsNoTracking().SingleAsync();
+        Assert.AreEqual(RemoteMirrorStatus.Diverged, mirror.Status);
+        Assert.AreEqual(new string('c', 40), mirror.LastObservedRemoteHead);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPullFastForward_UpdatesBranch()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Pull);
+        var localTarget = new string('a', 40);
+        var remoteTarget = new string('b', 40);
+        fixture.References.LocalReferences["refs/heads/main"] = localTarget;
+        fixture.References.RemoteReferences["refs/heads/main"] = remoteTarget;
+        fixture.References.Ancestors.Add((localTarget, remoteTarget));
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorStatus.Succeeded, result.Status);
+        Assert.AreEqual(remoteTarget, fixture.References.LocalReferences["refs/heads/main"]);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPullMovedTagAndStop_PreservesLocalTagAndRecordsDivergence()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Pull);
+        var localTarget = new string('a', 40);
+        var remoteTarget = new string('b', 40);
+        fixture.References.LocalReferences["refs/tags/v1"] = localTarget;
+        fixture.References.RemoteReferences["refs/tags/v1"] = remoteTarget;
+        fixture.References.Ancestors.Add((localTarget, remoteTarget));
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsFalse(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorStatus.Diverged, result.Status);
+        Assert.AreEqual(RemoteMirrorErrorCodes.Diverged, result.ErrorCode);
+        Assert.AreEqual(localTarget, fixture.References.LocalReferences["refs/tags/v1"]);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPushOverwrite_UsesForceAndConsumesMergedRefEvent()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(
+            RemoteMirrorDirection.Push,
+            RemoteMirrorDivergencePolicy.OverwriteTarget);
+        fixture.References.LocalReferences["refs/heads/main"] = new string('b', 40);
+        fixture.References.RemoteReferences["refs/heads/main"] = new string('c', 40);
+        await using (var dbContext = fixture.CreateDbContext())
+        {
+            dbContext.RemoteMirrorRefUpdates.Add(new GitCandyRemoteMirrorRefUpdate
+            {
+                MirrorId = fixture.MirrorId,
+                ReferenceName = "refs/heads/main",
+                OldObjectId = new string('a', 40),
+                NewObjectId = new string('b', 40),
+                Generation = 3,
+                EnqueuedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(
+            result.Succeeded,
+            $"status={result.Status}; error={result.ErrorCode}; requests={fixture.Backend.Requests.Count}");
+        Assert.AreEqual(RemoteMirrorStatus.Succeeded, result.Status);
+        var push = fixture.Backend.Requests.Single(item =>
+            item.Operation == RemoteRepositorySyncOperation.Push);
+        Assert.AreEqual(1, push.RefSpecs.Count);
+        Assert.IsTrue(push.RefSpecs[0].Force);
+        Assert.AreEqual("refs/heads/main", push.RefSpecs[0].SourceReference);
+        await using var verification = fixture.CreateDbContext();
+        Assert.AreEqual(0, await verification.RemoteMirrorRefUpdates.CountAsync());
+        Assert.AreEqual(
+            new string('b', 40),
+            await verification.RepositoryMirrors.AsNoTracking()
+                .Select(item => item.LastObservedRemoteHead)
+                .SingleAsync());
+        Assert.IsTrue(await verification.GovernanceAuditEvents.AsNoTracking()
+            .AnyAsync(item => item.Action == "mirror.push.force"
+                && item.ReferenceName == "refs/heads/main"));
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPushMovedTagAndStop_DoesNotPushTag()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Push);
+        var remoteTarget = new string('a', 40);
+        var localTarget = new string('b', 40);
+        fixture.References.RemoteReferences["refs/tags/v1"] = remoteTarget;
+        fixture.References.LocalReferences["refs/tags/v1"] = localTarget;
+        fixture.References.Ancestors.Add((remoteTarget, localTarget));
+        await fixture.EnqueueAsync("refs/tags/v1", remoteTarget, localTarget);
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsFalse(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorStatus.Diverged, result.Status);
+        Assert.AreEqual(RemoteMirrorErrorCodes.Diverged, result.ErrorCode);
+        Assert.IsFalse(fixture.Backend.Requests.Any(item =>
+            item.Operation == RemoteRepositorySyncOperation.Push));
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPushPruneAndRemoteOnlyReference_DeletesRemoteReference()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Push);
+        fixture.References.RemoteReferences["refs/heads/removed"] = new string('a', 40);
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(result.Succeeded);
+        var push = fixture.Backend.Requests.Single(item =>
+            item.Operation == RemoteRepositorySyncOperation.Push);
+        var deletion = push.RefSpecs.Single();
+        Assert.IsTrue(deletion.IsDelete);
+        Assert.AreEqual("refs/heads/removed", deletion.DestinationReference);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPushPruneDisabled_PreservesRemoteOnlyReference()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(
+            RemoteMirrorDirection.Push,
+            prune: false);
+        fixture.References.RemoteReferences["refs/heads/remote-only"] = new string('a', 40);
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.IsFalse(fixture.Backend.Requests.Any(item =>
+            item.Operation == RemoteRepositorySyncOperation.Push));
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithRevokedCredential_StopsBeforeRemoteProcessAndClassifiesFailure()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(
+            RemoteMirrorDirection.Pull,
+            credentialAvailable: false);
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsFalse(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorErrorCodes.CredentialUnavailable, result.ErrorCode);
+        Assert.AreEqual(0, fixture.Backend.Requests.Count);
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithPushPruneBeyondBackendLimit_UsesBoundedBatches()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Push);
+        for (var index = 0; index < 1025; index++)
+        {
+            fixture.References.RemoteReferences[$"refs/heads/removed-{index:D4}"] = new string('a', 40);
+        }
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(result.Succeeded);
+        var pushes = fixture.Backend.Requests
+            .Where(item => item.Operation == RemoteRepositorySyncOperation.Push)
+            .ToArray();
+        Assert.AreEqual(2, pushes.Length);
+        Assert.AreEqual(1024, pushes[0].RefSpecs.Count);
+        Assert.AreEqual(1, pushes[1].RefSpecs.Count);
+        Assert.IsTrue(pushes.SelectMany(item => item.RefSpecs).All(item => item.IsDelete));
+    }
+
+    [TestMethod]
+    public async Task SynchronizeAsync_WithMoreThanBackendRefLimit_ConsumesBoundedBatchAndRemainsPending()
+    {
+        await using var fixture = await MirrorFixture.CreateAsync(RemoteMirrorDirection.Push);
+        await using (var dbContext = fixture.CreateDbContext())
+        {
+            for (var index = 0; index < 1025; index++)
+            {
+                var referenceName = $"refs/heads/b{index:D4}";
+                fixture.References.LocalReferences[referenceName] = new string('b', 40);
+                dbContext.RemoteMirrorRefUpdates.Add(new GitCandyRemoteMirrorRefUpdate
+                {
+                    MirrorId = fixture.MirrorId,
+                    ReferenceName = referenceName,
+                    OldObjectId = new string('0', 40),
+                    NewObjectId = new string('b', 40),
+                    Generation = 1,
+                    EnqueuedAtUtc = DateTime.UtcNow,
+                    UpdatedAtUtc = DateTime.UtcNow.AddTicks(index)
+                });
+            }
+            await dbContext.SaveChangesAsync();
+        }
+
+        var result = await fixture.Service.SynchronizeAsync(fixture.MirrorId);
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.AreEqual(RemoteMirrorStatus.Pending, result.Status);
+        Assert.AreEqual(
+            1024,
+            fixture.Backend.Requests.Single(item => item.Operation == RemoteRepositorySyncOperation.Push)
+                .RefSpecs.Count);
+        await using var verification = fixture.CreateDbContext();
+        Assert.AreEqual(1, await verification.RemoteMirrorRefUpdates.CountAsync());
+    }
+
+    private sealed class MirrorFixture : IAsyncDisposable
+    {
+        private readonly SqliteConnection _connection;
+        private readonly DbContextOptions<GitCandyDbContext> _options;
+
+        private MirrorFixture(
+            SqliteConnection connection,
+            DbContextOptions<GitCandyDbContext> options,
+            RemoteMirrorService service,
+            FakeReferenceStore references,
+            FakeSyncBackend backend,
+            long mirrorId,
+            long repositoryId)
+        {
+            _connection = connection;
+            _options = options;
+            Service = service;
+            References = references;
+            Backend = backend;
+            MirrorId = mirrorId;
+            RepositoryId = repositoryId;
+            DbContextFactory = new TestDbContextFactory(options);
+        }
+
+        public RemoteMirrorService Service { get; }
+        public FakeReferenceStore References { get; }
+        public FakeSyncBackend Backend { get; }
+        public long MirrorId { get; }
+        public long RepositoryId { get; }
+        public IDbContextFactory<GitCandyDbContext> DbContextFactory { get; }
+
+        public async Task EnqueueAsync(
+            string referenceName,
+            string oldObjectId,
+            string newObjectId)
+        {
+            await using var dbContext = CreateDbContext();
+            dbContext.RemoteMirrorRefUpdates.Add(new GitCandyRemoteMirrorRefUpdate
+            {
+                MirrorId = MirrorId,
+                ReferenceName = referenceName,
+                OldObjectId = oldObjectId,
+                NewObjectId = newObjectId,
+                Generation = 1,
+                EnqueuedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        public static async Task<MirrorFixture> CreateAsync(
+            RemoteMirrorDirection direction,
+            RemoteMirrorDivergencePolicy divergencePolicy = RemoteMirrorDivergencePolicy.Stop,
+            bool prune = true,
+            bool credentialAvailable = true)
+        {
+            var connection = new SqliteConnection("Data Source=:memory:");
+            await connection.OpenAsync();
+            var options = new DbContextOptionsBuilder<GitCandyDbContext>()
+                .UseSqlite(connection)
+                .Options;
+            await using var dbContext = new GitCandyDbContext(options);
+            await dbContext.Database.EnsureCreatedAsync();
+            var user = new GitCandy.Data.Identity.GitCandyUser
+            {
+                Id = "mirror-owner",
+                UserName = "mirror-owner",
+                NormalizedUserName = "MIRROR-OWNER",
+                SecurityStamp = Guid.NewGuid().ToString("N")
+            };
+            var repository = new GitCandyRepository
+            {
+                NamespaceId = GitCandyNamespace.LegacyNamespaceId,
+                StorageName = "mirror-service",
+                Name = "mirror-service",
+                Description = string.Empty,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+            dbContext.Users.Add(user);
+            dbContext.Repositories.Add(repository);
+            await dbContext.SaveChangesAsync();
+            var connectionEntity = new GitCandyRemoteAccountConnection
+            {
+                OwnerKind = RemoteConnectionOwnerKind.User,
+                OwnerUserId = user.Id,
+                Provider = RemoteProviderKind.GitHub,
+                ServerUrl = "https://github.com/",
+                ExternalAccountId = "mirror-account",
+                AccountKind = RemoteAccountKind.User,
+                Login = "mirror-owner",
+                AuthenticationKind = RemoteAuthenticationKind.PersonalAccessToken,
+                CredentialReference = "vault:mirror-service",
+                GrantedScopes = "[\"repo\"]",
+                IsEnabled = true,
+                Status = RemoteConnectionStatus.Healthy,
+                CreatedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow
+            };
+            dbContext.RemoteAccountConnections.Add(connectionEntity);
+            await dbContext.SaveChangesAsync();
+            var mirror = new GitCandyRepositoryMirror
+            {
+                RepositoryId = repository.Id,
+                ConnectionId = connectionEntity.Id,
+                RemoteRepositoryId = "mirror-repository",
+                RemoteOwnerLogin = "upstream",
+                RemoteRepositoryName = "mirror-service",
+                RemoteGitUrl = "https://github.com/upstream/mirror-service.git",
+                Direction = direction,
+                Authority = direction == RemoteMirrorDirection.Pull
+                    ? RemoteMirrorAuthority.Remote
+                    : RemoteMirrorAuthority.GitCandy,
+                RefFilterKind = RemoteMirrorRefFilterKind.AllRefs,
+                DivergencePolicy = divergencePolicy,
+                Prune = prune,
+                IsEnabled = true,
+                Status = RemoteMirrorStatus.Pending,
+                CreatedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow
+            };
+            dbContext.RepositoryMirrors.Add(mirror);
+            await dbContext.SaveChangesAsync();
+
+            var factory = new TestDbContextFactory(options);
+            var references = new FakeReferenceStore();
+            var backend = new FakeSyncBackend();
+            var provider = new FakeRemoteProvider();
+            var queue = new RemoteMirrorJobQueue(factory, TimeProvider.System);
+            var service = new RemoteMirrorService(
+                factory,
+                new FakeProviderCatalog(provider),
+                new FakeCredentialVault(credentialAvailable),
+                backend,
+                references,
+                new NoopPushEventSink(),
+                queue,
+                new FakePathResolver(),
+                TimeProvider.System,
+                NullLogger<RemoteMirrorService>.Instance);
+            return new MirrorFixture(
+                connection,
+                options,
+                service,
+                references,
+                backend,
+                mirror.Id,
+                repository.Id);
+        }
+
+        public GitCandyDbContext CreateDbContext() => new(_options);
+
+        public async ValueTask DisposeAsync()
+        {
+            Service.Dispose();
+            await _connection.DisposeAsync();
+        }
+    }
+
+    private sealed class TestDbContextFactory(DbContextOptions<GitCandyDbContext> options)
+        : IDbContextFactory<GitCandyDbContext>
+    {
+        public GitCandyDbContext CreateDbContext() => new(options);
+    }
+
+    private sealed class FakeReferenceStore : IRemoteMirrorReferenceStore
+    {
+        public Dictionary<string, string> LocalReferences { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> RemoteReferences { get; } = new(StringComparer.Ordinal);
+        public HashSet<(string Ancestor, string Descendant)> Ancestors { get; } = [];
+
+        public IReadOnlyDictionary<string, string> ReadReferences(
+            GitRepositoryContext repository,
+            string referencePrefix,
+            CancellationToken cancellationToken = default)
+        {
+            if (referencePrefix.StartsWith(RemoteMirrorReferenceNamespace.Prefix, StringComparison.Ordinal))
+            {
+                var result = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var item in RemoteReferences)
+                {
+                    var stagedName = item.Key.StartsWith("refs/heads/", StringComparison.Ordinal)
+                        ? referencePrefix + "heads/" + item.Key["refs/heads/".Length..]
+                        : referencePrefix + "tags/" + item.Key["refs/tags/".Length..];
+                    result[stagedName] = item.Value;
+                }
+                return result;
+            }
+
+            return LocalReferences
+                .Where(item => item.Key.StartsWith(referencePrefix, StringComparison.Ordinal))
+                .ToDictionary(StringComparer.Ordinal);
+        }
+
+        public bool IsAncestor(
+            GitRepositoryContext repository,
+            string ancestorObjectId,
+            string descendantObjectId,
+            CancellationToken cancellationToken = default) =>
+            Ancestors.Contains((ancestorObjectId, descendantObjectId));
+
+        public void ApplyUpdates(
+            GitRepositoryContext repository,
+            IReadOnlyList<RemoteMirrorReferenceUpdate> updates,
+            CancellationToken cancellationToken = default)
+        {
+            foreach (var update in updates)
+            {
+                if (update.TargetObjectId is null)
+                {
+                    LocalReferences.Remove(update.ReferenceName);
+                }
+                else
+                {
+                    LocalReferences[update.ReferenceName] = update.TargetObjectId;
+                }
+            }
+        }
+
+        public void DeleteNamespace(
+            GitRepositoryContext repository,
+            string referencePrefix,
+            CancellationToken cancellationToken = default)
+        {
+        }
+    }
+
+    private sealed class FakeSyncBackend : IRemoteRepositorySyncBackend
+    {
+        public List<RemoteRepositorySyncRequest> Requests { get; } = [];
+
+        public Task<RemoteRepositorySyncResult> ExecuteAsync(
+            RemoteRepositorySyncRequest request,
+            RemoteCredential credential,
+            CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            return Task.FromResult(new RemoteRepositorySyncResult(request.Operation, TimeSpan.Zero));
+        }
+    }
+
+    private sealed class FakeRemoteProvider : IRemoteRepositoryProvider
+    {
+        public RemoteProviderKind Kind => RemoteProviderKind.GitHub;
+        public Uri ServerUrl { get; } = new("https://github.com/");
+        public RemoteProviderCapabilities Capabilities => RemoteProviderCapabilities.PullMirror | RemoteProviderCapabilities.PushMirror;
+        public IReadOnlySet<RemoteAuthenticationKind> AuthenticationKinds { get; } =
+            new HashSet<RemoteAuthenticationKind> { RemoteAuthenticationKind.PersonalAccessToken };
+
+        public IReadOnlySet<string> GetRequiredScopes(
+            RemoteAccountKind accountKind,
+            RemoteRepositoryOperations operations) => new HashSet<string>(["repo"], StringComparer.Ordinal);
+
+        public Task<RemoteProviderDiagnostic> TestAsync(RemoteAccountConnectionContext connection, RemoteCredential credential, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<RemoteAccountProfile?> GetAccountAsync(RemoteAccountConnectionContext connection, RemoteCredential credential, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<RemoteRepositoryPage> GetRepositoriesAsync(RemoteAccountConnectionContext connection, RemoteCredential credential, string? cursor, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeProviderCatalog(IRemoteRepositoryProvider provider) : IRemoteProviderCatalog
+    {
+        public IReadOnlyList<RemoteProviderKind> AvailableProviders { get; } = [provider.Kind];
+        public IRemoteRepositoryProvider? Get(RemoteProviderKind kind) => kind == provider.Kind ? provider : null;
+    }
+
+    private sealed class FakeCredentialVault(bool credentialAvailable) : IRemoteCredentialVault
+    {
+        public Task<RemoteCredentialMetadata> StoreAsync(RemoteConnectionOwner owner, RemoteCredential credential, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public ValueTask<RemoteCredential?> ResolveAsync(RemoteSecretReference reference, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(credentialAvailable
+                ? new RemoteCredential(
+                    RemoteAuthenticationKind.PersonalAccessToken,
+                    new RemoteSecret("fixture-secret"),
+                    ["repo"])
+                : null);
+
+        public Task<RemoteCredentialMetadata?> RotateAsync(RemoteSecretReference reference, RemoteCredential replacement, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<bool> RevokeAsync(RemoteSecretReference reference, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class NoopPushEventSink : IRemoteMirrorPushEventSink
+    {
+        public Task EnqueueAsync(long repositoryId, IReadOnlyList<RemoteMirrorRefEvent> updates, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class FakePathResolver : IGitRepositoryPathResolver
+    {
+        public string RepositoryRootPath => Path.GetFullPath("repositories");
+        public string ResolveRepositoryPath(string repositoryName) => Path.Combine(RepositoryRootPath, repositoryName);
+    }
+}
